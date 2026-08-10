@@ -366,3 +366,92 @@ float64 sf_sub64(SFState *s, float64 a, float64 b) {
     return sf_add64(s, a, b ^ (1ull << 63));
 }
 
+/* ------------------------------------------------------------------ */
+/* multiply (float32)                                                   */
+/* ------------------------------------------------------------------ */
+
+float32 sf_mul32(SFState *s, float32 a, float32 b) {
+    if (F32_ISNAN(a) || F32_ISNAN(b)) return nan32(s, a, b);
+
+    int sa = (int)F32_SIGN(a), sb = (int)F32_SIGN(b);
+    int sign = sa ^ sb;
+
+    /* Inf × 0 = invalid */
+    if (F32_ISINF(a) && F32_ISZERO(b)) { s->flags |= SF_NV; return F32_QNAN; }
+    if (F32_ISINF(b) && F32_ISZERO(a)) { s->flags |= SF_NV; return F32_QNAN; }
+    if (F32_ISINF(a) || F32_ISINF(b))  return ((uint32_t)sign << 31) | F32_INF;
+    if (F32_ISZERO(a) || F32_ISZERO(b)) return (uint32_t)sign << 31;
+
+    int ea, eb;
+    uint32_t ma, mb;
+    unpack32(a, &sa, &ea, &ma);
+    unpack32(b, &sb, &eb, &mb);
+
+    int exp = ea + eb - F32_BIAS;
+
+    /* ma and mb are each (MBITS+1) = 24 bits wide.
+     * product is at most 48 bits: leading 1 at bit 47 or 46. */
+    uint64_t prod = (uint64_t)ma * mb;
+
+    /* normalize so leading 1 is at bit MBITS+1 = 24, giving a
+     * (MBITS+2)-wide value for round_pack32. */
+    uint32_t mant, sticky;
+    if (prod >> 47) {
+        /* leading 1 at bit 47: shift right 23, keep 25 bits */
+        sticky = (prod & ((1ull << 23) - 1)) != 0;
+        mant   = (uint32_t)(prod >> 23);
+        mant   = (mant & ~1u) | sticky;
+        exp++;
+    } else {
+        /* leading 1 at bit 46: shift right 22, keep 25 bits */
+        sticky = (prod & ((1ull << 22) - 1)) != 0;
+        mant   = (uint32_t)(prod >> 22);
+        mant   = (mant & ~1u) | sticky;
+    }
+
+    return round_pack32(s, sign, exp, mant);
+}
+
+/* ------------------------------------------------------------------ */
+/* multiply (float64)                                                   */
+/* ------------------------------------------------------------------ */
+
+float64 sf_mul64(SFState *s, float64 a, float64 b) {
+    if (F64_ISNAN(a) || F64_ISNAN(b)) return nan64(s, a, b);
+
+    int sa = (int)F64_SIGN(a), sb = (int)F64_SIGN(b);
+    int sign = sa ^ sb;
+
+    if (F64_ISINF(a) && F64_ISZERO(b)) { s->flags |= SF_NV; return F64_QNAN; }
+    if (F64_ISINF(b) && F64_ISZERO(a)) { s->flags |= SF_NV; return F64_QNAN; }
+    if (F64_ISINF(a) || F64_ISINF(b))  return ((uint64_t)sign << 63) | F64_INF;
+    if (F64_ISZERO(a) || F64_ISZERO(b)) return (uint64_t)sign << 63;
+
+    int ea, eb;
+    uint64_t ma, mb;
+    unpack64(a, &sa, &ea, &ma);
+    unpack64(b, &sb, &eb, &mb);
+
+    int exp = ea + eb - F64_BIAS;
+
+    /* ma and mb are each (MBITS+1) = 53 bits.
+     * product is at most 106 bits: leading 1 at bit 105 or 104. */
+    __uint128_t prod = (__uint128_t)ma * mb;
+
+    uint64_t mant, sticky;
+    if ((uint64_t)(prod >> 105) & 1) {
+        /* leading 1 at bit 105: shift right 53, keep 55 bits (MBITS+2+1) */
+        sticky = (prod & (((__uint128_t)1 << 53) - 1)) != 0;
+        mant   = (uint64_t)(prod >> 53);
+        mant   = (mant & ~1ull) | sticky;
+        exp++;
+    } else {
+        /* leading 1 at bit 104: shift right 52 */
+        sticky = (prod & (((__uint128_t)1 << 52) - 1)) != 0;
+        mant   = (uint64_t)(prod >> 52);
+        mant   = (mant & ~1ull) | sticky;
+    }
+
+    return round_pack64(s, sign, exp, mant);
+}
+
