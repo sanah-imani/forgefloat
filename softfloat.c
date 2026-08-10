@@ -202,14 +202,167 @@ static float64 round_pack64(SFState *s, int sign, int exp, uint64_t mant) {
          | (mant & ((1ull << F64_MBITS) - 1));
 }
 
+/* ------------------------------------------------------------------ */
+/* NaN propagation helpers                                              */
+/* ------------------------------------------------------------------ */
+
 static float32 nan32(SFState *s, float32 a, float32 b) {
     s->flags |= SF_NV;
-    /* Prefer first sNaN/qNaN, force quiet bit */
+    /* prefer first sNaN/qNaN; force quiet bit */
     float32 n = F32_ISNAN(a) ? a : b;
     return n | (1u << (F32_MBITS - 1));
 }
+
 static float64 nan64(SFState *s, float64 a, float64 b) {
     s->flags |= SF_NV;
     float64 n = F64_ISNAN(a) ? a : b;
     return n | (1ull << (F64_MBITS - 1));
 }
+
+/* ------------------------------------------------------------------ */
+/* add / sub (float32)                                                  */
+/* ------------------------------------------------------------------ */
+
+float32 sf_add32(SFState *s, float32 a, float32 b) {
+    /* NaN */
+    if (F32_ISNAN(a) || F32_ISNAN(b)) return nan32(s, a, b);
+
+    int sa = (int)F32_SIGN(a), sb = (int)F32_SIGN(b);
+
+    /* Inf + (-Inf) = invalid */
+    if (F32_ISINF(a) && F32_ISINF(b)) {
+        if (sa != sb) { s->flags |= SF_NV; return F32_QNAN; }
+        return a;
+    }
+    if (F32_ISINF(a)) return a;
+    if (F32_ISINF(b)) return b;
+
+    int ea, eb;
+    uint32_t ma, mb;
+    unpack32(a, &sa, &ea, &ma);
+    unpack32(b, &sb, &eb, &mb);
+
+    /* canonical order: ensure ea >= eb; if equal, ensure ma >= mb
+     * so that on the subtraction path ma - mb never wraps */
+    if (ea < eb || (ea == eb && ma < mb)) {
+        int ti = ea; ea = eb; eb = ti;
+        uint32_t tm = ma; ma = mb; mb = tm;
+        int ts = sa; sa = sb; sb = ts;
+    }
+
+    /* align mb to the same exponent as ma */
+    int shift = ea - eb;
+    uint32_t sticky = 0;
+    if (shift >= 27) {
+        sticky = (mb != 0);
+        mb = 0;
+    } else if (shift > 0) {
+        sticky = (mb << (32 - shift)) != 0;
+        mb = (mb >> shift) | sticky;
+    }
+
+    uint32_t mant;
+    int sign, exp = ea;
+
+    if (sa == sb) {
+        /* same sign: add magnitudes */
+        sign = sa;
+        mant = ma + mb;
+        /* carry may push a 1 into bit MBITS+1; shift right, preserve sticky */
+        if (mant >> (F32_MBITS + 1)) {
+            sticky  = mant & 1;
+            mant    = (mant >> 1) | sticky;
+            exp++;
+        }
+    } else {
+        /* different signs: subtract (ma >= mb guaranteed by swap above) */
+        mant = ma - mb;
+        sign = sa;
+        if (mant == 0) {
+            /* exact cancellation: result is +0, except -0 when rounding down */
+            return (uint32_t)(s->rm == SF_RDN) << 31;
+        }
+        /* renormalize: count_leading_zeroes32 sees a value at most MBITS+1 wide;
+         * we want the leading 1 at bit MBITS, so shift = clz - (32-(MBITS+1)) */
+        int lz = count_leading_zeroes32(mant) - (32 - (F32_MBITS + 1));
+        mant <<= lz;
+        exp  -= lz;
+    }
+
+    /* mant is now MBITS+1 wide with the implicit 1 at bit MBITS.
+     * shift left 1 to produce the MBITS+2 layout round_pack32 expects:
+     *   bit[MBITS+1] = implicit 1, bit[1] = round, bit[0] = sticky  */
+    return round_pack32(s, sign, exp, mant << 1);
+}
+
+float32 sf_sub32(SFState *s, float32 a, float32 b) {
+    /* flip b's sign bit and reuse add */
+    return sf_add32(s, a, b ^ (1u << 31));
+}
+
+/* ------------------------------------------------------------------ */
+/* add / sub (float64)                                                  */
+/* ------------------------------------------------------------------ */
+
+float64 sf_add64(SFState *s, float64 a, float64 b) {
+    if (F64_ISNAN(a) || F64_ISNAN(b)) return nan64(s, a, b);
+
+    int sa = (int)F64_SIGN(a), sb = (int)F64_SIGN(b);
+
+    if (F64_ISINF(a) && F64_ISINF(b)) {
+        if (sa != sb) { s->flags |= SF_NV; return F64_QNAN; }
+        return a;
+    }
+    if (F64_ISINF(a)) return a;
+    if (F64_ISINF(b)) return b;
+
+    int ea, eb;
+    uint64_t ma, mb;
+    unpack64(a, &sa, &ea, &ma);
+    unpack64(b, &sb, &eb, &mb);
+
+    if (ea < eb || (ea == eb && ma < mb)) {
+        int ti = ea; ea = eb; eb = ti;
+        uint64_t tm = ma; ma = mb; mb = tm;
+        int ts = sa; sa = sb; sb = ts;
+    }
+
+    int shift = ea - eb;
+    uint64_t sticky = 0;
+    if (shift >= 56) {
+        sticky = (mb != 0);
+        mb = 0;
+    } else if (shift > 0) {
+        sticky = (mb << (64 - shift)) != 0;
+        mb = (mb >> shift) | sticky;
+    }
+
+    uint64_t mant;
+    int sign, exp = ea;
+
+    if (sa == sb) {
+        sign = sa;
+        mant = ma + mb;
+        if (mant >> (F64_MBITS + 1)) {
+            sticky  = mant & 1;
+            mant    = (mant >> 1) | sticky;
+            exp++;
+        }
+    } else {
+        mant = ma - mb;
+        sign = sa;
+        if (mant == 0) {
+            return (uint64_t)(s->rm == SF_RDN) << 63;
+        }
+        int lz = count_leading_zeroes64(mant) - (64 - (F64_MBITS + 1));
+        mant <<= lz;
+        exp  -= lz;
+    }
+
+    return round_pack64(s, sign, exp, mant << 1);
+}
+
+float64 sf_sub64(SFState *s, float64 a, float64 b) {
+    return sf_add64(s, a, b ^ (1ull << 63));
+}
+
