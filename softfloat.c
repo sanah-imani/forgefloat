@@ -3,7 +3,6 @@
 */
 
 #include "softfloat.h"
-#include <cstdint>
 #include <stdint.h>
 
 #define F32_SBITS 1
