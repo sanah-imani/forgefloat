@@ -3,6 +3,7 @@
 */
 
 #include "softfloat.h"
+#include <cstdint>
 #include <stdint.h>
 
 #define F32_SBITS 1
@@ -592,4 +593,43 @@ int sf_cmp64(SFState *s, float64 a, float64 b){
 
     if (sa == 0) return (a < b) ? -1 : (a > b) ? 1 : 0;
     else return (a > b) ? -1 : (a < b) ? 1:0;
+}
+
+static uint64_t is_sqrt64(uint64_t n){
+    if (n == 0) return 0;
+    uint64_t res = 1ull << ((64 - count_leading_zeroes64(n) + 1) >> 1);
+    
+    uint64_t approx_next;
+    do {
+        approx_next = (res + n / res) >> 1;
+    } while (approx_next < res && (res = approx_next, 1));
+
+    while (res * res > n)res--;
+    return res;
+}
+
+float32 sf_sqrt32(SFState *s, float32 a){
+    if (F32_ISNAN(a)) return nan32(s, a, a);
+    int sa = (int) F32_SIGN(a);
+    if (sa) { s->flags |= SF_NV; return F32_QNAN;} 
+
+    if (F32_ISINF(a)) return a;
+
+    int ea;
+    uint32_t ma;
+    unpack32(a, &sa, &ea, &ma);
+    
+    if (ea & 1){
+        ma <<= 1;
+        ea--;
+    }
+    int exp = (ea - F32_BIAS) / 2 + F32_BIAS;
+
+    uint64_t m = (uint64_t)ma << (F32_MBITS + 2);
+    uint64_t sq = is_sqrt64(m);
+    uint64_t rem = m - sq * sq;
+
+    uint32_t mant = (uint32_t)((sq << 1) | (rem != 0));
+
+    return round_pack32(s, 0, exp,mant);
 }
