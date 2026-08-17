@@ -21,7 +21,6 @@
 #define SOFTFLOAT_H 
 
 
-#include <cstdint>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -44,7 +43,7 @@
 /* opaque float types*/
 
 typedef uint32_t float32;
-typedef uint32_t float64;
+typedef uint64_t float64;
 
 /* floating - point state*/
 typedef struct {
@@ -68,7 +67,7 @@ float64 sf_add64(SFState *s, float64 a, float64 b);
 float64 sf_sub64(SFState *s, float64 a, float64 b);
 float64 sf_mul64(SFState *s, float64 a, float64 b);
 float64 sf_div64(SFState *s, float64 a, float64 b);
-float64 sf_sqrt32(SFState *s, float32 a);
+float64 sf_sqrt64(SFState *s, float64 a);
 
 /* comparisons*/
 
@@ -100,14 +99,14 @@ float32 sf_f64_to_f32(SFState *s, float64 a);
 static inline float32 sf_f32_pack(float v){
     float32 u; __builtin_memcpy(&u, &v, 4); return u;
 }
-static inline float32 sf_f32_unpack(float v){
-    float32 u; __builtin_memcpy(&u, &v, 4); return u;
+static inline float sf_f32_unpack(float32 v){
+    float u; __builtin_memcpy(&u, &v, 4); return u;
 }
-static inline float32 sf_f64_pack(float v){
-    float32 u; __builtin_memcpy(&u, &v, 4); return u;
+static inline float64 sf_f64_pack(double v){
+    float64 u; __builtin_memcpy(&u, &v, 8); return u;
 }
-static inline float32 sf_f64_unpack(float v){
-    float32 u; __builtin_memcpy(&u, &v, 4); return u;
+static inline double sf_f64_unpack(float64 v){
+    double u; __builtin_memcpy(&u, &v, 8); return u;
 }
 
 #endif
