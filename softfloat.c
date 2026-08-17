@@ -594,6 +594,43 @@ int sf_cmp64(SFState *s, float64 a, float64 b){
     else return (a > b) ? -1 : (a < b) ? 1:0;
 }
 
+static uint64_t isqrt128(__uint128_t n) {
+    if (n == 0) return 0;
+    uint64_t hi = (uint64_t)(n >> 64);
+    uint64_t x = hi
+        ? (1ull << ((64 - count_leading_zeroes64(hi) + 65) >> 1))
+        : (1ull << ((64 - count_leading_zeroes64((uint64_t)n) + 1) >> 1));
+    uint64_t x1;
+    do {
+        x1 = (uint64_t)((((__uint128_t)x + n / x)) >> 1);
+    } while (x1 < x && (x = x1, 1));
+    while ((__uint128_t)x * x > n) x--;
+    return x;
+}
+
+float64 sf_sqrt64(SFState *s, float64 a) {
+    if (F64_ISNAN(a)) return nan64(s, a, a);
+    int sa = (int)F64_SIGN(a);
+    if (F64_ISZERO(a)) return a;
+    if (sa) { s->flags |= SF_NV; return F64_QNAN; }
+    if (F64_ISINF(a)) return a;
+
+    int ea;
+    uint64_t ma;
+    unpack64(a, &sa, &ea, &ma);
+
+    if (ea & 1) { ma <<= 1; ea--; }
+    int exp = (ea - F64_BIAS) / 2 + F64_BIAS;
+
+    __uint128_t m   = (__uint128_t)ma << (F64_MBITS + 1);
+    uint64_t sq     = isqrt128(m);
+    __uint128_t rem = m - (__uint128_t)sq * sq;
+
+    uint64_t mant = (sq << 1) | (rem != 0);
+
+    return round_pack64(s, 0, exp, mant);
+}
+
 static uint64_t is_sqrt64(uint64_t n){
     if (n == 0) return 0;
     uint64_t res = 1ull << ((64 - count_leading_zeroes64(n) + 1) >> 1);
