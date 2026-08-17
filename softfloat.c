@@ -488,3 +488,61 @@ float32 sf_div32(SFState *s, float32 a, float32 b){
     }
     return round_pack32(s, sign, exp, mant);
 }
+
+/* ------------------------------------------------------------------ */
+/* divide (float64)                                                     */
+/*                                                                      */
+/* Algorithm:                                                           */
+/*   ma and mb are each (F64_MBITS+1) = 53 bits wide.                  */
+/*   Shift ma left by (F64_MBITS+2) = 54 bits to form a 107-bit        */
+/*   numerator in __uint128_t.  Divide by mb (53-bit) to get a         */
+/*   54- or 55-bit quotient.  Nonzero remainder → sticky bit.          */
+/*   Result exponent: ea - eb + F64_BIAS (bias added back once because  */
+/*   both stored exponents are already biased).                         */
+/* ------------------------------------------------------------------ */
+float64 sf_div64(SFState *s, float64 a, float64 b) {
+    if (F64_ISNAN(a) || F64_ISNAN(b)) return nan64(s, a, b);
+
+    int sa = (int)F64_SIGN(a), sb = (int)F64_SIGN(b);
+    int sign = sa ^ sb;
+
+    /* Inf / Inf and 0 / 0 are both invalid */
+    if (F64_ISINF(a) && F64_ISINF(b))   { s->flags |= SF_NV; return F64_QNAN; }
+    if (F64_ISZERO(a) && F64_ISZERO(b)) { s->flags |= SF_NV; return F64_QNAN; }
+
+    if (F64_ISINF(a))  return ((uint64_t)sign << 63) | F64_INF;
+    if (F64_ISINF(b))  return (uint64_t)sign << 63;              /* x / Inf = ±0 */
+
+    /* finite nonzero / 0 → ±Inf, set DZ */
+    if (F64_ISZERO(b)) { s->flags |= SF_DZ; return ((uint64_t)sign << 63) | F64_INF; }
+    if (F64_ISZERO(a)) return (uint64_t)sign << 63;              /* 0 / finite = ±0 */
+
+    int ea, eb;
+    uint64_t ma, mb;
+    unpack64(a, &sa, &ea, &ma);
+    unpack64(b, &sb, &eb, &mb);
+
+    int exp = ea - eb + F64_BIAS;
+
+    /* Form a 107-bit numerator: ma (53 bits) << 54.
+     * Dividing by mb (53 bits) gives a quotient of at most 54+1 = 55 bits,
+     * with the leading 1 at bit 53 or 54 — matching round_pack64's expectation
+     * of (F64_MBITS+2)-wide mant with the implicit 1 at bit F64_MBITS+1. */
+    __uint128_t num  = (__uint128_t)ma << (F64_MBITS + 2);
+    uint64_t quot    = (uint64_t)(num / mb);
+    uint64_t rem     = (uint64_t)(num % mb);
+
+    /* Fold remainder into sticky bit.  round_pack64 owns the rounding decision;
+     * we just need to preserve the information that bits were lost. */
+    uint64_t mant = quot | (rem != 0);
+
+    /* Normalize: if the leading 1 is at bit F64_MBITS (53) rather than
+     * bit F64_MBITS+1 (54), the division was exact without a carry.
+     * Shift left 1 and decrement exponent to land in the right position. */
+    if (!(mant >> (F64_MBITS + 1))) {
+        mant <<= 1;
+        exp--;
+    }
+
+    return round_pack64(s, sign, exp, mant);
+}
