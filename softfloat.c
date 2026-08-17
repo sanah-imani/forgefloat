@@ -455,3 +455,36 @@ float64 sf_mul64(SFState *s, float64 a, float64 b) {
     return round_pack64(s, sign, exp, mant);
 }
 
+float32 sf_div32(SFState *s, float32 a, float32 b){
+    if (F32_ISNAN(a) || F32_ISNAN(b)) return nan32(s, a, b);
+    int sa = (int) F32_SIGN(a), sb = (int) F32_SIGN(b);
+
+    int sign = sa ^ sb;
+
+    if (F32_ISINF(a) && F32_ISINF(b)) { s->flags |= SF_NV; return F32_QNAN;}
+    if (F32_ISZERO(a) && F32_ISZERO(b)) { s->flags |= SF_NV; return F32_QNAN;}
+    if (F32_ISINF(a)) return ((uint32_t)sign << 31) | F32_INF;
+    if (F32_ISINF(b)) return (uint32_t) sign << 31;
+
+    if (F32_ISZERO(b)) {s->flags |= SF_DZ; return ((uint32_t) sign << 31) | F32_INF;}
+    if (F32_ISZERO(a)) return (uint32_t) sign << 31;
+
+    int ea, eb;
+    uint32_t ma, mb;
+    unpack32(a, &sa, &ea, &ma);
+    unpack32(b,&sb, &eb, &mb);
+
+    int exp = ea - eb + F32_BIAS;
+
+    uint64_t num = (uint64_t) ma << (F32_MBITS + 2);
+    uint64_t quotient = num / mb;
+    uint64_t rem = num % mb;
+
+    uint32_t mant = (uint32_t) quotient | (rem != 0);
+
+    if (!(mant >> (F32_MBITS + 1))){
+        mant <<= 1;
+        exp--;
+    }
+    return round_pack32(s, sign, exp, mant);
+}
