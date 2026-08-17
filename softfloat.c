@@ -476,14 +476,30 @@ float32 sf_div32(SFState *s, float32 a, float32 b){
 
     int exp = ea - eb + F32_BIAS;
 
-    uint64_t num = (uint64_t) ma << (F32_MBITS + 2);
+    /* Shift ma left by (F32_MBITS+3) = 26 bits so that after integer division
+     * we have enough bits to populate round_pack32's layout correctly:
+     *   bit[F32_MBITS+1] = implicit 1, bits[F32_MBITS..2] = frac, bit[1] = round, bit[0] = sticky.
+     * With shift=26: quot is 27-bit when ma>=mb, 26-bit when ma<mb.
+     * Collapse the bits shifted out into the sticky position before normalizing. */
+    uint64_t num = (uint64_t) ma << (F32_MBITS + 3);
     uint64_t quotient = num / mb;
     uint64_t rem = num % mb;
 
-    uint32_t mant = (uint32_t) quotient | (rem != 0);
+    /* Preserve sticky: OR the remainder into bit0 of the quotient so that
+     * any truncated bits are visible to round_pack32's rounding logic. */
+    uint32_t mant = (uint32_t)(quotient | (rem != 0));
 
-    if (!(mant >> (F32_MBITS + 1))){
-        mant <<= 1;
+    /* Normalize to (F32_MBITS+2)-wide value with leading 1 at bit F32_MBITS+1 (bit 24):
+     *   27-bit quot (ma >= mb, ratio in [1,2)): shift right 2; exp unchanged.
+     *   26-bit quot (ma <  mb, ratio in [0.5,1)): shift right 1; exp-- (ratio < 1). */
+    if (mant >> (F32_MBITS + 3)) {
+        /* 27-bit: fold two bits into sticky and shift right 2 */
+        uint32_t dropped = mant & 3;
+        mant = (mant >> 2) | (dropped != 0);
+    } else {
+        /* 26-bit: fold one bit into sticky and shift right 1; adjust exp */
+        uint32_t dropped = mant & 1;
+        mant = (mant >> 1) | dropped;
         exp--;
     }
     return round_pack32(s, sign, exp, mant);
@@ -536,13 +552,44 @@ float64 sf_div64(SFState *s, float64 a, float64 b) {
      * we just need to preserve the information that bits were lost. */
     uint64_t mant = quot | (rem != 0);
 
-    /* Normalize: if the leading 1 is at bit F64_MBITS (53) rather than
-     * bit F64_MBITS+1 (54), the division was exact without a carry.
-     * Shift left 1 and decrement exponent to land in the right position. */
-    if (!(mant >> (F64_MBITS + 1))) {
-        mant <<= 1;
+    /* Normalize to (F64_MBITS+2)-wide value with leading 1 at bit F64_MBITS+1:
+     *   quot 55-bit (ma >= mb, mantissa ratio in [1,2)): shift right 1; exp correct.
+     *   quot 54-bit (ma <  mb, mantissa ratio in [0.5,1)): exp was 1 too high; decrement. */
+    if (mant >> (F64_MBITS + 2)) {
+        mant >>= 1;
+    } else {
         exp--;
     }
 
     return round_pack64(s, sign, exp, mant);
+}
+
+int sf_cmp32(SFState *s, float32 a, float32 b){
+    if (F32_ISNAN(a) || F32_ISNAN(b)) {
+        s->flags |= SF_NV; return 2;
+    }
+
+    if (F32_ISZERO(a) && F32_ISZERO(b)) return 0;
+
+    int sa = (int) F32_SIGN(a), sb = (int) F32_SIGN(b);
+
+    if (sa != sb) return sa ? -1 : 1;
+
+    if (sa == 0) return (a < b) ? -1 : (a > b) ? 1 : 0;
+    else return (a > b) ? -1 : (a < b) ? 1:0;
+}
+
+int sf_cmp64(SFState *s, float64 a, float64 b){
+    if (F64_ISNAN(a) || F64_ISNAN(b)) {
+        s->flags |= SF_NV; return 2;
+    }
+
+    if (F64_ISZERO(a) && F64_ISZERO(b)) return 0;
+
+    int sa = (int) F64_SIGN(a), sb = (int) F64_SIGN(b);
+
+    if (sa != sb) return sa ? -1 : 1;
+
+    if (sa == 0) return (a < b) ? -1 : (a > b) ? 1 : 0;
+    else return (a > b) ? -1 : (a < b) ? 1:0;
 }
