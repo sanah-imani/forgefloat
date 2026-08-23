@@ -669,3 +669,43 @@ float32 sf_sqrt32(SFState *s, float32 a){
 
     return round_pack32(s, 0, exp,mant);
 }
+
+float64 sf_f32_to_f64(SFState *s, float32 a){
+    if (F32_ISNAN(a)){
+        s->flags |= SF_NV;
+        return F64_QNAN | ((uint64_t) F32_FRAC(a) << (F64_MBITS - F32_MBITS));
+    }
+    int sa = (int) F32_SIGN(a);
+    if (F32_ISINF(a)) return ((uint64_t) sa << 63) | F64_INF;
+    if (F32_ISZERO(a)) return ((uint64_t) sa << 63);
+
+    int ea;
+    uint32_t ma;
+    unpack32(a, &sa, &ea, &ma);
+    
+    int exp = ea - F32_BIAS + F64_BIAS;
+    uint64_t mant = (uint64_t) (ma & ((1u << F32_MBITS) -1)) << (F64_MBITS - F32_MBITS);
+    return ((uint64_t) sa << 63) | ((uint64_t) exp << F64_MBITS) | mant;
+}
+
+float32 sf_f64_to_f32(SFState *s, float64 a){
+    if (F64_ISNAN(a)){
+        s->flags |= SF_NV;
+        return F32_QNAN | (uint32_t)( F64_FRAC(a) >> (F64_MBITS - F32_MBITS));
+    }
+    int sa = (int) F64_SIGN(a);
+    if (F64_ISINF(a)) return ((uint32_t) sa << 31) | F32_INF;
+    if (F32_ISZERO(a)) return (uint32_t) sa << 31;
+
+    int ea;
+    uint64_t ma;
+    unpack64(a, &sa, &ea, &ma);
+
+    int exp = ea - F64_BIAS + F32_BIAS;
+    int shift = F64_MBITS - F32_MBITS + 1;
+
+    uint32_t sticky = (ma & ((  1ull >> shift) - 1)) != 0;
+    uint32_t mant =  (uint32_t) (ma >> shift) | sticky;
+    return round_pack32(s, sa, exp, mant);
+
+}
