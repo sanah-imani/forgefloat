@@ -695,7 +695,7 @@ float32 sf_f64_to_f32(SFState *s, float64 a){
     }
     int sa = (int) F64_SIGN(a);
     if (F64_ISINF(a)) return ((uint32_t) sa << 31) | F32_INF;
-    if (F32_ISZERO(a)) return (uint32_t) sa << 31;
+    if (F64_ISZERO(a)) return (uint32_t) sa << 31;
 
     int ea;
     uint64_t ma;
@@ -704,8 +704,82 @@ float32 sf_f64_to_f32(SFState *s, float64 a){
     int exp = ea - F64_BIAS + F32_BIAS;
     int shift = F64_MBITS - F32_MBITS + 1;
 
-    uint32_t sticky = (ma & ((  1ull >> shift) - 1)) != 0;
+    uint32_t sticky = (ma & ((1ull << shift) - 1)) != 0;
     uint32_t mant =  (uint32_t) (ma >> shift) | sticky;
     return round_pack32(s, sa, exp, mant);
+}
 
+
+static float32 uint_to_f32(SFState *s, int sign, uint64_t v) {
+    if (v == 0) return 0;
+    int exp = 63 - count_leading_zeroes64(v) + F32_BIAS;
+    /* shift v into a 25-bit (F32_MBITS+2) window for round_pack32.
+     * The leading 1 is at bit (exp-F32_BIAS); we want it at bit F32_MBITS+1=24.
+     * shift_left  = 24 - (exp-F32_BIAS)  when value is narrow
+     * shift_right = (exp-F32_BIAS) - 24  when value is wide */
+    int bits = 63 - count_leading_zeroes64(v); /* position of leading 1 */
+    uint32_t mant;
+    if (bits <= (F32_MBITS + 1)) {
+        mant = (uint32_t)(v << ((F32_MBITS + 1) - bits));
+    } else {
+        int rshift = bits - (F32_MBITS + 1);
+        uint32_t sticky = (v & ((1ull << rshift) - 1)) != 0;
+        mant = (uint32_t)(v >> rshift) | sticky;
+    }
+    return round_pack32(s, sign, exp, mant);
+}
+
+static float64 uint_to_f64(SFState *s, int sign, uint64_t v) {
+    if (v == 0) return 0;
+    int bits = 63 - count_leading_zeroes64(v);
+    int exp  = bits + F64_BIAS;
+    uint64_t mant;
+    if (bits <= (F64_MBITS + 1)) {
+        mant = v << ((F64_MBITS + 1) - bits);
+    } else {
+        int rshift = bits - (F64_MBITS + 1);
+        uint64_t sticky = (v & ((1ull << rshift) - 1)) != 0;
+        mant = (v >> rshift) | sticky;
+    }
+    return round_pack64(s, sign, exp, mant);
+}
+
+float32 sf_i32_to_f32(SFState *s, int32_t v) {
+    if (v == 0) return 0;
+    int sign = v < 0;
+    return uint_to_f32(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+
+float32 sf_i64_to_f32(SFState *s, int64_t v) {
+    if (v == 0) return 0;
+    int sign = v < 0;
+    return uint_to_f32(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+
+float32 sf_u32_to_f32(SFState *s, uint32_t v) {
+    return uint_to_f32(s, 0, (uint64_t)v);
+}
+
+float32 sf_u64_to_f32(SFState *s, uint64_t v) {
+    return uint_to_f32(s, 0, v);
+}
+
+float64 sf_i32_to_f64(SFState *s, int32_t v) {
+    if (v == 0) return 0;
+    int sign = v < 0;
+    return uint_to_f64(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+
+float64 sf_i64_to_f64(SFState *s, int64_t v) {
+    if (v == 0) return 0;
+    int sign = v < 0;
+    return uint_to_f64(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+
+float64 sf_u32_to_f64(SFState *s, uint32_t v) {
+    return uint_to_f64(s, 0, (uint64_t)v);
+}
+
+float64 sf_u64_to_f64(SFState *s, uint64_t v) {
+    return uint_to_f64(s, 0, v);
 }
