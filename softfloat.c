@@ -712,19 +712,23 @@ float32 sf_f64_to_f32(SFState *s, float64 a){
 
 static float32 uint_to_f32(SFState *s, int sign, uint64_t v) {
     if (v == 0) return 0;
-    int exp = 63 - count_leading_zeroes64(v) + F32_BIAS;
-    /* shift v into a 25-bit (F32_MBITS+2) window for round_pack32.
-     * The leading 1 is at bit (exp-F32_BIAS); we want it at bit F32_MBITS+1=24.
-     * shift_left  = 24 - (exp-F32_BIAS)  when value is narrow
-     * shift_right = (exp-F32_BIAS) - 24  when value is wide */
-    int bits = 63 - count_leading_zeroes64(v); /* position of leading 1 */
+    int bits = 63 - count_leading_zeroes64(v); /* position of leading 1 (0-indexed) */
+    int exp  = bits + F32_BIAS;
     uint32_t mant;
     if (bits <= (F32_MBITS + 1)) {
+        /* value fits: shift left so leading 1 lands at bit F32_MBITS+1=24.
+         * No rounding needed; sticky and round bits are zero. */
         mant = (uint32_t)(v << ((F32_MBITS + 1) - bits));
     } else {
-        int rshift = bits - (F32_MBITS + 1);
-        uint32_t sticky = (v & ((1ull << rshift) - 1)) != 0;
-        mant = (uint32_t)(v >> rshift) | sticky;
+        /* round_pack32 entry layout: bit[24]=implicit1, bit[23..2]=22 frac bits,
+         * bit[1]=round (first dropped bit), bit[0]=sticky (OR of everything below).
+         * We want entry[1] = v[bits-23] and entry[0] = OR(v[bits-24..0]).
+         * shift right by (bits-23) so v[bits..bits-23] occupy bits[23..0] of quot,
+         * then shift quot left 1 to make room at bit0 for sticky. */
+        int rshift = bits - F32_MBITS;          /* lands leading 1 at bit F32_MBITS=23 */
+        uint32_t sticky = (v & ((1ull << (rshift - 1)) - 1)) != 0;
+        uint32_t quot   = (uint32_t)(v >> (rshift - 1)); /* 25-bit: leading 1 at bit24, bit0=round */
+        mant = (quot & ~1u) | sticky;           /* replace bit0 with true sticky */
     }
     return round_pack32(s, sign, exp, mant);
 }
