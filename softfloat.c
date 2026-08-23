@@ -594,6 +594,109 @@ int sf_cmp64(SFState *s, float64 a, float64 b){
     else return (a > b) ? -1 : (a < b) ? 1:0;
 }
 
+/* ------------------------------------------------------------------ */
+/* float -> integer conversions                                         */
+/* ------------------------------------------------------------------ */
+
+#include <limits.h>
+
+static int64_t f64_to_int(SFState *s, float64 a, int rm,
+                           int64_t int_min, int64_t int_max, int is_unsigned) {
+    if (F64_ISNAN(a)) { s->flags |= SF_NV; return int_max; }
+    int sa = (int)F64_SIGN(a);
+    if (F64_ISINF(a)) { s->flags |= SF_NV; return sa ? int_min : int_max; }
+    if (F64_ISZERO(a)) return 0;
+
+    int ea; uint64_t ma;
+    unpack64(a, &sa, &ea, &ma);
+    int exp = ea - F64_BIAS;
+
+    if (exp > (is_unsigned ? 63 : 62)) { s->flags |= SF_NV; return sa ? int_min : int_max; }
+
+    if (exp < 0) {
+        if (ma) s->flags |= SF_NX;
+        int inc = 0;
+        switch (rm) {
+            case SF_RDN: inc = sa && ma; break;
+            case SF_RUP: inc = !sa && ma; break;
+            default: break;
+        }
+        return inc ? (sa ? -1LL : 1LL) : 0LL;
+    }
+
+    uint64_t result;
+    if (exp >= (int)F64_MBITS) {
+        result = ma << (exp - (int)F64_MBITS);
+    } else {
+        int fshift = (int)F64_MBITS - exp;
+        uint64_t frac = ma & ((1ull << fshift) - 1);
+        result = ma >> fshift;
+        if (frac) {
+            s->flags |= SF_NX;
+            int rbit = (fshift > 1) ? (int)((frac >> (fshift - 1)) & 1) : 0;
+            int stky = (fshift > 1) ? (frac & ((1ull << (fshift-1)) - 1)) != 0 : 0;
+            int inc = 0;
+            switch (rm) {
+                case SF_RNE: inc = rbit && (stky || (result & 1)); break;
+                case SF_RTZ: inc = 0; break;
+                case SF_RDN: inc = sa && (rbit || stky); break;
+                case SF_RUP: inc = !sa && (rbit || stky); break;
+                case SF_RMM: inc = rbit; break;
+            }
+            result += inc;
+        }
+    }
+
+    if (sa) {
+        if (result > (uint64_t)(-(int64_t)int_min)) { s->flags |= SF_NV; return int_min; }
+        return -(int64_t)result;
+    } else {
+        if (!is_unsigned && result > (uint64_t)int_max) { s->flags |= SF_NV; return int_max; }
+        return (int64_t)result;
+    }
+}
+
+static int64_t f32_to_int(SFState *s, float32 a, int rm,
+                           int64_t int_min, int64_t int_max, int is_unsigned) {
+    SFState tmp = sf_init(rm);
+    float64 ad  = sf_f32_to_f64(&tmp, a);
+    s->flags   |= tmp.flags & SF_NV;
+    return f64_to_int(s, ad, rm, int_min, int_max, is_unsigned);
+}
+
+int32_t  sf_f32_to_i32(SFState *s, float32 a, int rm, int saturate) {
+    (void)saturate;
+    return (int32_t)f32_to_int(s, a, rm, (int64_t)INT32_MIN, (int64_t)INT32_MAX, 0);
+}
+int64_t  sf_f32_to_i64(SFState *s, float32 a, int rm, int saturate) {
+    (void)saturate;
+    return f32_to_int(s, a, rm, INT64_MIN, INT64_MAX, 0);
+}
+uint32_t sf_f32_to_u32(SFState *s, float32 a, int rm, int saturate) {
+    (void)saturate;
+    return (uint32_t)f32_to_int(s, a, rm, 0, (int64_t)UINT32_MAX, 1);
+}
+uint64_t sf_f32_to_u64(SFState *s, float32 a, int rm, int saturate) {
+    (void)saturate;
+    return (uint64_t)f32_to_int(s, a, rm, 0, INT64_MAX, 1);
+}
+int32_t  sf_f64_to_i32(SFState *s, float64 a, int rm, int saturate) {
+    (void)saturate;
+    return (int32_t)f64_to_int(s, a, rm, (int64_t)INT32_MIN, (int64_t)INT32_MAX, 0);
+}
+int64_t  sf_f64_to_i64(SFState *s, float64 a, int rm, int saturate) {
+    (void)saturate;
+    return f64_to_int(s, a, rm, INT64_MIN, INT64_MAX, 0);
+}
+uint32_t sf_f64_to_u32(SFState *s, float64 a, int rm, int saturate) {
+    (void)saturate;
+    return (uint32_t)f64_to_int(s, a, rm, 0, (int64_t)UINT32_MAX, 1);
+}
+uint64_t sf_f64_to_u64(SFState *s, float64 a, int rm, int saturate) {
+    (void)saturate;
+    return (uint64_t)f64_to_int(s, a, rm, 0, INT64_MAX, 1);
+}
+
 static uint64_t isqrt128(__uint128_t n) {
     if (n == 0) return 0;
     uint64_t hi = (uint64_t)(n >> 64);
@@ -669,3 +772,101 @@ float32 sf_sqrt32(SFState *s, float32 a){
 
     return round_pack32(s, 0, exp,mant);
 }
+
+/* ------------------------------------------------------------------ */
+/* float <-> float conversions                                          */
+/* ------------------------------------------------------------------ */
+
+float64 sf_f32_to_f64(SFState *s, float32 a) {
+    if (F32_ISNAN(a)) {
+        s->flags |= SF_NV;
+        return F64_QNAN | ((uint64_t)F32_FRAC(a) << (F64_MBITS - F32_MBITS));
+    }
+    int sa = (int)F32_SIGN(a);
+    if (F32_ISINF(a))  return ((uint64_t)sa << 63) | F64_INF;
+    if (F32_ISZERO(a)) return (uint64_t)sa << 63;
+
+    int ea; uint32_t ma;
+    unpack32(a, &sa, &ea, &ma);
+
+    int exp = ea - F32_BIAS + F64_BIAS;
+    uint64_t mant = (uint64_t)(ma & ((1u << F32_MBITS) - 1)) << (F64_MBITS - F32_MBITS);
+    return ((uint64_t)sa << 63) | ((uint64_t)exp << F64_MBITS) | mant;
+}
+
+float32 sf_f64_to_f32(SFState *s, float64 a) {
+    if (F64_ISNAN(a)) {
+        s->flags |= SF_NV;
+        return F32_QNAN | (uint32_t)(F64_FRAC(a) >> (F64_MBITS - F32_MBITS));
+    }
+    int sa = (int)F64_SIGN(a);
+    if (F64_ISINF(a))  return ((uint32_t)sa << 31) | F32_INF;
+    if (F64_ISZERO(a)) return (uint32_t)sa << 31;
+
+    int ea; uint64_t ma;
+    unpack64(a, &sa, &ea, &ma);
+
+    int exp   = ea - F64_BIAS + F32_BIAS;
+    int shift = F64_MBITS - F32_MBITS - 1;   /* 28 */
+    uint32_t sticky = (ma & ((1ull << shift) - 1)) != 0;
+    uint32_t mant   = (uint32_t)(ma >> shift) | sticky;
+    return round_pack32(s, sa, exp, mant);
+}
+
+/* ------------------------------------------------------------------ */
+/* int -> float conversions                                             */
+/* ------------------------------------------------------------------ */
+
+static float32 uint_to_f32(SFState *s, int sign, uint64_t v) {
+    if (v == 0) return (uint32_t)sign << 31;
+    int bits = 63 - count_leading_zeroes64(v);
+    int exp  = bits + F32_BIAS;
+    uint32_t mant;
+    if (bits <= (F32_MBITS + 1)) {
+        mant = (uint32_t)(v << ((F32_MBITS + 1) - bits));
+    } else {
+        int rshift  = bits - F32_MBITS;
+        uint32_t sticky = (uint32_t)((v & ((1ull << (rshift - 1)) - 1)) != 0);
+        uint32_t quot   = (uint32_t)(v >> (rshift - 1));
+        mant = (quot & ~1u) | sticky;
+    }
+    return round_pack32(s, sign, exp, mant);
+}
+
+static float64 uint_to_f64(SFState *s, int sign, uint64_t v) {
+    if (v == 0) return (uint64_t)sign << 63;
+    int bits = 63 - count_leading_zeroes64(v);
+    int exp  = bits + F64_BIAS;
+    uint64_t mant;
+    if (bits <= (F64_MBITS + 1)) {
+        mant = v << ((F64_MBITS + 1) - bits);
+    } else {
+        int rshift      = bits - F64_MBITS;
+        uint64_t sticky = (v & ((1ull << (rshift - 1)) - 1)) != 0;
+        uint64_t quot   = v >> (rshift - 1);
+        mant = (quot & ~1ull) | sticky;
+    }
+    return round_pack64(s, sign, exp, mant);
+}
+
+float32 sf_i32_to_f32(SFState *s, int32_t v) {
+    int sign = v < 0;
+    return uint_to_f32(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+float32 sf_i64_to_f32(SFState *s, int64_t v) {
+    int sign = v < 0;
+    return uint_to_f32(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+float32 sf_u32_to_f32(SFState *s, uint32_t v) { return uint_to_f32(s, 0, (uint64_t)v); }
+float32 sf_u64_to_f32(SFState *s, uint64_t v) { return uint_to_f32(s, 0, v); }
+
+float64 sf_i32_to_f64(SFState *s, int32_t v) {
+    int sign = v < 0;
+    return uint_to_f64(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+float64 sf_i64_to_f64(SFState *s, int64_t v) {
+    int sign = v < 0;
+    return uint_to_f64(s, sign, sign ? -(uint64_t)v : (uint64_t)v);
+}
+float64 sf_u32_to_f64(SFState *s, uint32_t v) { return uint_to_f64(s, 0, (uint64_t)v); }
+float64 sf_u64_to_f64(SFState *s, uint64_t v) { return uint_to_f64(s, 0, v); }
